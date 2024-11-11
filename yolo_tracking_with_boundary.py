@@ -1,6 +1,6 @@
 from ultralytics import YOLO
 import cv2
-import pandas as pd
+import numpy as np
 import time
 from collections import deque
 from typing import List, Tuple
@@ -8,7 +8,8 @@ from typing import List, Tuple
 class DetectedObject:
     def __init__(self, obj_id: int, initial_position: Tuple[int, int], max_history: int = 20):
         self.id = obj_id
-        self.history = deque([initial_position], maxlen=max_history)
+        self.history = deque([], maxlen=max_history)
+        self.initial_position = initial_position
         self.counted = False
         self.last_detected = time.time()
 
@@ -25,23 +26,6 @@ class DetectedObject:
     def is_counted(self) -> bool:
         return self.counted
 
-
-model = YOLO('yolo11n.pt')  # or use a custom-trained model
-video_path = 'busfinal.mp4'
-cap = cv2.VideoCapture(video_path)
-
-roi = [(300, 150), (850, 500)]  # Top-left and bottom-right corners
-counting_line = [(780, 150), (700, 500)]  # Adjust these coordinates to match the interior area of the bus
-entry_edge = 'top'   # Define entry edge (e.g., 'left', 'top', 'right', 'bottom')
-exit_edge = 'right'   # Define exit edge (opposite side)
-
-# Initialize variables
-# max_history = 20  
-# tracker = model.track
-passenger_count = 0
-# tracked_objects = {}
-
-
 class ObjectTracker:
     def __init__(self, max_history=20, max_inactive_frames=30, distance_threshold=20):
         self.max_history = max_history
@@ -49,6 +33,15 @@ class ObjectTracker:
         self.distance_threshold = distance_threshold  # Max distance to consider duplicate detections
         self.tracked_objects = {}
 
+
+model = YOLO('yolo11n.pt')  # or use a custom-trained model
+video_path = 'busfinal.mp4'
+cap = cv2.VideoCapture(video_path)
+roi = [(300, 150), (850, 500)]  # Top-left and bottom-right corners
+counting_line = [(780, 150), (700, 500)]  # Adjust these coordinates to match the interior area of the bus
+entry_edge = 'top'   # Define entry edge (e.g., 'left', 'top', 'right', 'bottom')
+exit_edge = 'right'   # Define exit edge (opposite side)
+passenger_count = 0
 tracker = ObjectTracker()
 
 def is_inside_roi(point, roi):
@@ -105,6 +98,14 @@ def check_entry_edge(position, edge, top_left, bottom_right):
 def check_exit_edge(position, edge, top_left, bottom_right):
     return check_entry_edge(position, edge, top_left, bottom_right)
 
+
+# tracker_type: bytetrack
+# track_high_thresh: 0.5
+# track_low_thresh: 0.1
+# new_track_thresh: 0.6
+# track_buffer: 30
+# match_thresh: 0.9
+
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
@@ -112,14 +113,17 @@ while cap.isOpened():
 
     frame = cv2.resize(frame, (1020, 500))
 
-    results = model.track(frame, persist=True, classes=[0], conf=0.2)  # 0 is the class ID for person
+    results = model.track(frame, persist=True, classes=[0], conf=0.4, tracker='bytetrack.yaml', iou=0.5)  # 0 is the class ID for person
 
     for result in results:
-    
-        boxes = result.boxes.xyxy.cpu().numpy().astype(int)
-        ids = result.boxes.id.cpu().numpy().astype(int)
+        try:
+            boxes = result.boxes.xyxy.cpu().numpy().astype(int)
+            ids = result.boxes.id.cpu().numpy().astype(int)
+            confs = result.boxes.conf.cpu().numpy().astype(float)
+        except:
+            continue
 
-        for box, id in zip(boxes, ids):
+        for box, id, conf in zip(boxes, ids, confs):
             x1, y1, x2, y2 = box
             center_point = ((x1 + x2) // 2, (y1 + y2) // 2)
 
@@ -159,14 +163,23 @@ while cap.isOpened():
 
     
             # Draw bounding box and ID
-
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, f"ID: {id}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            # frame = results[0].plot()
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)
+            cv2.putText(frame, f"ID: {id}, Confidence: {conf:.2f}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
+            points = np.hstack(tracker.tracked_objects[id].history).astype(np.int32).reshape((-1, 1, 2))
+            cv2.polylines(frame, [points], isClosed=False, color=(0, 230, 230), thickness=2)
             cv2.circle(frame, (center_point[0], center_point[1]), 5, (255, 0, 0), -1)
+            
+            # Draw bounding box, ID, and center point
+            # cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            # cv2.putText(frame, f"ID: {id}", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+            # cv2.circle(frame, center_point, 5, (255, 0, 0), -1)
+
+            
 
     # Draw counting line
     cv2.line(frame, counting_line[0], counting_line[1], (0, 0, 255), 2)
-    cv2.rectangle(frame, roi[0], roi[1], (255, 0, 0), 2)
+    cv2.rectangle(frame, roi[0], roi[1], (100, 255, 100), 2)
 
     # Display passenger count
     cv2.putText(frame, f"Passenger Count: {passenger_count}", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 2)
@@ -181,7 +194,7 @@ cv2.destroyAllWindows()
 print("total passenger count:", passenger_count)
 print("passenger info-")
 
-for id, val in tracker.tracked_objects.items():
+for id, obj in tracker.tracked_objects.items():
     print('Id', id)
-    print({k: v for k, v in val.items() if k != 'history'})
+    print('vals-', obj.counted, obj.initial_position, obj.last_detected)
   
